@@ -79,6 +79,13 @@ if (process.env.OAUTH2_SIGNIN_ENABLED == "true" || process.env.OAUTH2_SIGNIN_ENA
 winston.info('Authentication Oauth2 Signin enabled : ' + enableOauth2Signin);
 
 
+var enableLdapSignin = false;
+if (process.env.LDAP_SIGNIN_ENABLED == "true" || process.env.LDAP_SIGNIN_ENABLED == true) {
+    enableLdapSignin = true;
+}
+winston.info('Authentication LDAP Signin enabled : ' + enableLdapSignin);
+
+
 var jwthistory = undefined;
 try {
     jwthistory = require('@tiledesk-ent/tiledesk-server-jwthistory');
@@ -681,7 +688,102 @@ module.exports = function (passport) {
     }
 
 
-// const KeycloakStrategy = require('@exlinc/keycloak-passport')
+    if (enableLdapSignin == true) {
+        const LdapStrategy = require('passport-ldapauth');
+
+        var ldapServer = {
+            url: process.env.LDAP_URL,
+            bindDN: process.env.LDAP_BIND_DN,
+            bindCredentials: process.env.LDAP_BIND_CREDENTIALS,
+            searchBase: process.env.LDAP_SEARCH_BASE,
+            searchFilter: process.env.LDAP_SEARCH_FILTER || '(uid={{username}})',
+        };
+
+        if (process.env.LDAP_TLS_CA_CERT) {
+            ldapServer.tlsOptions = { ca: [process.env.LDAP_TLS_CA_CERT.replace(/\\n/g, '\n')] };
+        }
+
+        winston.info('Enabling LDAP Signin strategy with url: ' + process.env.LDAP_URL + ' searchBase: ' + process.env.LDAP_SEARCH_BASE);
+
+        passport.use(new LdapStrategy({
+                server: ldapServer,
+                usernameField: process.env.LDAP_USERNAME_FIELD || 'username',
+                passwordField: process.env.LDAP_PASSWORD_FIELD || 'password',
+            },
+            async function (ldapUser, done) {
+                try {
+                    winston.debug('(LDAP) ldapUser', ldapUser);
+
+                    const rawEmail = ldapUser.mail || ldapUser.email || ldapUser.userPrincipalName;
+                    if (!rawEmail) {
+                        winston.warn('LDAP user has no email attribute', {dn: ldapUser.dn});
+                        return done(null, false, {message: 'Missing email from LDAP profile.'});
+                    }
+
+                    const email = rawEmail.toLowerCase().trim();
+                    winston.debug('(LDAP) email: ' + email);
+
+                    const subject = ldapUser.dn;
+                    const query = {providerId: 'ldap', subject: subject};
+                    winston.debug('(LDAP) query', query);
+
+                    const cred = await Auth.findOne(query).exec();
+                    winston.debug('(LDAP) cred', cred);
+
+                    if (cred) {
+                        const user = await User.findOne({email: email, status: 100})
+                            .select('email firstname lastname password emailverified id')
+                            .exec();
+
+                        if (!user) {
+                            winston.warn('(LDAP) Auth link exists but user not found/active', {email: email});
+                            return done(null, false, {message: 'User not found.'});
+                        }
+
+                        return done(null, user);
+                    }
+
+                    let user = await User.findOne({email: email, status: 100})
+                        .select('email firstname lastname password emailverified id')
+                        .exec();
+
+                    if (!user) {
+                        const displayName = ldapUser.cn || ldapUser.displayName || email;
+                        const password = uniqid();
+                        try {
+                            user = await userService.signup(email, password, displayName, '', true);
+                        } catch (err) {
+                            if (err && err.code === 11000) {
+                                user = await User.findOne({email: email, status: 100})
+                                    .select('email firstname lastname password emailverified id')
+                                    .exec();
+                            } else {
+                                winston.error('(LDAP) Error signup ldap', err);
+                                return done(err);
+                            }
+                        }
+                    }
+
+                    if (!user) {
+                        return done(null, false, {message: 'User not found.'});
+                    }
+
+                    await Auth.findOneAndUpdate(
+                        query,
+                        {$setOnInsert: {providerId: 'ldap', email: email, subject: subject}},
+                        {upsert: true, new: true}
+                    ).exec();
+
+                    return done(null, user);
+                } catch (err) {
+                    winston.error('(LDAP) strategy verify error', err);
+                    return done(err);
+                }
+            }
+        ));
+    }
+
+
 
 
 // // Register the strategy with passport
