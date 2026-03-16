@@ -848,6 +848,43 @@ router.get('/oauth2/callback', passport.authenticate('oauth2', { session: false 
   res.redirect(url);
 });
 
+router.post('/ldap', function (req, res, next) {
+  passport.authenticate('ldapauth', {session: false}, function (err, user, info) {
+    if (err) {
+      winston.error('(LDAP) authentication error', err);
+      return res.status(500).send({success: false, msg: 'Authentication error.'});
+    }
+
+    if (!user) {
+      var message = (info && info.message) ? info.message : 'Authentication failed.';
+      winston.warn('(LDAP) authentication failed', {info: info});
+      return res.status(401).send({success: false, msg: message});
+    }
+
+    var userJson = user.toObject();
+    delete userJson.password;
+
+    var signOptions = {
+      issuer: 'https://tiledesk.com',
+      subject: 'user',
+      audience: 'https://tiledesk.com',
+      jwtid: uuidv4()
+    };
+
+    var alg = process.env.GLOBAL_SECRET_ALGORITHM;
+    if (alg) {
+      signOptions.algorithm = alg;
+    }
+
+    var token = jwt.sign(userJson, configSecret, signOptions);
+
+    authEvent.emit('user.signin', {user: userJson, req: req, jti: signOptions.jwtid, token: 'JWT ' + token});
+
+    return res.json({success: true, token: 'JWT ' + token, user: userJson});
+  })(req, res, next);
+});
+
+
 router.get(
   "/keycloak",
   passport.authenticate("keycloak")
